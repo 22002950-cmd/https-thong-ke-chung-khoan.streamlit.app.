@@ -10,7 +10,7 @@ import re
 st.set_page_config(
     page_title="Vietnam Market Deep Dive",
     layout="wide",
-    page_icon="📈",
+    page_icon="",
     initial_sidebar_state="expanded"
 )
 
@@ -152,7 +152,7 @@ def calculate_technical_indicators(df):
 df = load_and_merge_data()
 
 if df.empty:
-    st.error("⚠️ Không tìm thấy dữ liệu hoặc file không đúng định dạng. Hãy upload 4 file CSV vào cùng thư mục.")
+    st.error(" Không tìm thấy dữ liệu hoặc file không đúng định dạng. Hãy upload 4 file CSV vào cùng thư mục.")
     st.stop()
 
 # --- SIDEBAR ---
@@ -183,7 +183,7 @@ if not selected_tickers:
 df_display = df_filtered[df_filtered['Ticker'].isin(selected_tickers)]
 
 # --- MAIN CONTENT ---
-st.title("💎 PRO TRADING ANALYTICS")
+st.title("TRADING ANALYTICS")
 st.markdown("Phân tích dữ liệu đa ngành: Chứng khoán, Thép, Bank, Bất động sản")
 st.markdown("---")
 
@@ -325,4 +325,74 @@ with tab4:
     st.plotly_chart(fig_dd, use_container_width=True)
 
 st.markdown("---")
+
 st.caption("Data source: Combined Sector Files | Processed by Python & Streamlit")
+            # --- 5. TÍNH NĂNG: XUẤT BÁO CÁO TỰ ĐỘNG (AUTO REPORT) ---
+st.markdown("---")
+st.header(" Báo Cáo Phân Tích Tự Động")
+st.caption("Hệ thống tự động quét dữ liệu và đưa ra khuyến nghị dựa trên chỉ báo kỹ thuật.")
+
+# --- 5. TÍNH NĂNG: XUẤT BÁO CÁO TỰ ĐỘNG (AUTO REPORT) ---
+st.markdown("---")
+st.header(" Báo Cáo Phân Tích Tự Động")
+st.caption("Hệ thống tự động quét dữ liệu và đưa ra khuyến nghị dựa trên chỉ báo kỹ thuật.")
+
+# Hàm tạo câu nhận xét
+def generate_insight(ticker, df_input):
+    # Lấy dữ liệu mới nhất
+    last_row = df_input.iloc[-1]
+    prev_row = df_input.iloc[-2]
+    
+    # 1. Xu hướng (Trend)
+    trend = "TĂNG" if last_row['Close'] > last_row['MA20'] else "GIẢM"
+    trend_icon = "🟢" if trend == "TĂNG" else "🔴"
+    
+    # 2. Động lượng (RSI)
+    rsi = last_row['RSI']
+    rsi_signal = "Trung tính"
+    if rsi > 70: rsi_signal = "QUÁ MUA (Nguy hiểm )"
+    elif rsi < 30: rsi_signal = "QUÁ BÁN (Cơ hội bắt đáy )"
+    
+    # 3. Biến động (Bollinger Bands)
+    bb_signal = "Bình thường"
+    if last_row['Close'] > last_row['Upper_Band']:
+        bb_signal = "Vượt dải trên (Đột biến giá)"
+    elif last_row['Close'] < last_row['Lower_Band']:
+        bb_signal = "Thủng dải dưới (Rơi mạnh)"
+        
+    return f"""
+    **Mã: {ticker}** ({last_row['Date'].strftime('%d/%m/%Y')})
+    - **Giá đóng cửa:** {last_row['Close']:,.0f} VND
+    - **Xu hướng ngắn hạn:** {trend_icon} Đang trong xu hướng {trend} (Giá {'trên' if trend=='TĂNG' else 'dưới'} MA20).
+    - **Trạng thái RSI:** {rsi:.1f} - {rsi_signal}.
+    - **Tín hiệu Bollinger:** {bb_signal}.
+    - **Khuyến nghị Robot:** {'Canh chốt lời dần' if rsi > 70 else ('Xem xét giải ngân' if rsi < 30 else 'Nắm giữ / Quan sát thêm')}.
+    """
+
+# Hiển thị báo cáo
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.info( **Tóm tắt Chỉ số Kỹ thuật**)
+    report_df = pd.DataFrame()
+    for ticker in selected_tickers:
+        t_df = df[df['Ticker'] == ticker].copy().sort_values('Date')
+        t_df = calculate_technical_indicators(t_df)
+        last_row = t_df.iloc[-1]
+        
+        report_df = pd.concat([report_df, pd.DataFrame({
+            'Mã': [ticker],
+            'Giá': [f"{last_row['Close']:,.0f}"],
+            'RSI': [f"{last_row['RSI']:.1f}"],
+            'MA20': [f"{last_row['MA20']:,.0f}"]
+        })])
+    st.table(report_df.set_index('Mã'))
+
+with col2:
+    st.success( **Nhận định chi tiết (AI Rule-based)**)
+    for ticker in selected_tickers:
+        t_df = df[df['Ticker'] == ticker].copy().sort_values('Date')
+        t_df = calculate_technical_indicators(t_df)
+        
+        with st.expander(f"Xem chi tiết mã {ticker}", expanded=True):
+            st.markdown(generate_insight(ticker, t_df))
