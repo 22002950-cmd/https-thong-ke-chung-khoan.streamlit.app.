@@ -5,11 +5,14 @@ import plotly.graph_objects as go
 import numpy as np
 import os
 import re
+import yfinance as yf  # <--- THƯ VIỆN MỚI CẦN CÀI
+from datetime import datetime, timedelta
 
 # --- 1. CẤU HÌNH TRANG ---
 st.set_page_config(
     page_title="Vietnam Market Analytics",
     layout="wide",
+    page_icon="📈",
     initial_sidebar_state="expanded"
 )
 
@@ -100,6 +103,96 @@ def load_and_merge_data():
     
     return df_final
 
+# --- HÀM MỚI: TỰ ĐỘNG CẬP NHẬT GIÁ (AUTO UPDATE) ---
+def update_realtime_data(df_historical):
+    """
+    Tự động tải dữ liệu mới từ Yahoo Finance nếu file CSV bị cũ.
+    """
+    if df_historical.empty:
+        return df_historical
+
+    # 1. Kiểm tra ngày dữ liệu mới nhất trong file
+    last_date = df_historical['Date'].max()
+    today = datetime.now()
+    
+    # Nếu dữ liệu đã cập nhật đến hôm qua/hôm nay thì bỏ qua
+    if last_date.date() >= (today - timedelta(days=1)).date():
+        return df_historical
+
+    # Thông báo nhẹ cho người dùng biết
+    st.toast(f"🔄 Đang cập nhật dữ liệu từ {last_date.date()} đến nay...", icon="cloud")
+
+    # 2. Lấy danh sách mã và map ngành để điền lại sau khi tải
+    ticker_sector_map = df_historical.set_index('Ticker')['Sector'].to_dict()
+    tickers = list(ticker_sector_map.keys())
+    
+    # Thêm đuôi .VN cho Yahoo Finance
+    yf_tickers = [t + ".VN" for t in tickers]
+    
+    try:
+        # 3. Tải dữ liệu mới
+        start_fetch = last_date + timedelta(days=1)
+        
+        # Nếu start_fetch > today (trường hợp data trong file là dự báo tương lai) thì dừng
+        if start_fetch.date() > today.date():
+             return df_historical
+
+        new_data = yf.download(yf_tickers, start=start_fetch, progress=False)
+        
+        if new_data.empty:
+            return df_historical
+            
+        # 4. Xử lý dữ liệu về format chuẩn (Date | Ticker | Close | Volume | Sector)
+        
+        # --- Xử lý cột Close ---
+        if 'Close' in new_data.columns:
+            df_close = new_data['Close'].reset_index()
+            # Nếu chỉ có 1 mã, pandas trả về Series/DataFrame đơn giản, cần xử lý riêng
+            if len(tickers) == 1:
+                # Đổi tên cột thành tên mã để melt hoạt động đúng
+                df_close.columns = ['Date', tickers[0]] 
+            
+            df_melted = df_close.melt(id_vars=['Date'], var_name='Ticker', value_name='Close')
+        else:
+            return df_historical
+            
+        # --- Xử lý cột Volume ---
+        if 'Volume' in new_data.columns:
+            df_vol = new_data['Volume'].reset_index()
+            if len(tickers) == 1:
+                df_vol.columns = ['Date', tickers[0]]
+                
+            df_vol_melted = df_vol.melt(id_vars=['Date'], var_name='Ticker', value_name='Volume')
+            # Gộp Volume vào bảng Close
+            df_melted = pd.merge(df_melted, df_vol_melted, on=['Date', 'Ticker'], how='left')
+        else:
+            df_melted['Volume'] = 0
+
+        # 5. Làm sạch dữ liệu mới tải về
+        # Xóa đuôi .VN (do yfinance trả về kèm .VN)
+        df_melted['Ticker'] = df_melted['Ticker'].str.replace('.VN', '', regex=False)
+        
+        # Điền lại cột Sector (Quan trọng để bộ lọc hoạt động)
+        df_melted['Sector'] = df_melted['Ticker'].map(ticker_sector_map)
+        
+        # Format cột Date
+        df_melted['Date'] = pd.to_datetime(df_melted['Date'])
+        
+        # Loại bỏ dòng không có giá (NaN)
+        df_melted = df_melted.dropna(subset=['Close'])
+
+        # 6. Gộp vào dữ liệu gốc
+        df_final = pd.concat([df_historical, df_melted], ignore_index=True)
+        # Sắp xếp lại
+        df_final = df_final.sort_values(['Ticker', 'Date']).reset_index(drop=True)
+        
+        st.toast("✅ Đã cập nhật xong dữ liệu mới nhất!", icon="check")
+        return df_final
+
+    except Exception as e:
+        st.warning(f"Không thể cập nhật giá realtime: {e}")
+        return df_historical
+
 # --- 3. TÍNH TOÁN CHỈ SỐ KỸ THUẬT ---
 
 def calculate_technical_indicators(df):
@@ -125,7 +218,12 @@ def calculate_technical_indicators(df):
 
 # --- 4. GIAO DIỆN CHÍNH ---
 
+# 1. Load file CSV
 df = load_and_merge_data()
+
+# 2. Tự động cập nhật thêm dữ liệu mới nhất (Realtime)
+with st.spinner('Đang kiểm tra và cập nhật dữ liệu thị trường mới nhất...'):
+    df = update_realtime_data(df)
 
 if df.empty:
     st.error("Không tìm thấy dữ liệu. Hãy kiểm tra tên file CSV trên GitHub.")
@@ -145,7 +243,9 @@ df_filtered = df[(df['Date'] >= pd.to_datetime(start_date)) &
                  (df['Sector'].isin(selected_sectors))]
 
 available_tickers = df_filtered['Ticker'].unique()
-selected_tickers = st.sidebar.multiselect("Chọn Mã (Max 5)", available_tickers, default=available_tickers[:3])
+# Chọn mặc định 3 mã đầu tiên
+default_tickers = available_tickers[:3] if len(available_tickers) > 0 else []
+selected_tickers = st.sidebar.multiselect("Chọn Mã (Max 5)", available_tickers, default=default_tickers)
 
 if not selected_tickers:
     st.warning("Vui lòng chọn ít nhất 1 mã cổ phiếu.")
@@ -169,14 +269,16 @@ for i, ticker in enumerate(selected_tickers):
         color_cls = "gain" if change >= 0 else "loss"
         symbol = "▲" if change >= 0 else "▼"
         
-        with cols[i]:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-lbl">{ticker}</div>
-                <div class="metric-val">{curr_price:,.0f}</div>
-                <div class="{color_cls}">{symbol} {change:.2f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
+        # Chỉ hiển thị nếu còn cột trống
+        if i < len(cols):
+            with cols[i]:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-lbl">{ticker}</div>
+                    <div class="metric-val">{curr_price:,.0f}</div>
+                    <div class="{color_cls}">{symbol} {change:.2f}%</div>
+                </div>
+                """, unsafe_allow_html=True)
 
 st.markdown("###")
 
@@ -185,82 +287,102 @@ tab1, tab2, tab3, tab4 = st.tabs(["Sức Mạnh Giá", "Phân Tích Kỹ Thuật
 
 with tab1:
     st.markdown("##### So sánh tăng trưởng (%) từ đầu kỳ")
-    pivot = df_display.pivot(index='Date', columns='Ticker', values='Close')
-    pivot_norm = pivot.apply(lambda x: (x / x.iloc[0] - 1) * 100)
-    fig_norm = px.line(pivot_norm, x=pivot_norm.index, y=pivot_norm.columns, template='plotly_dark')
-    st.plotly_chart(fig_norm, use_container_width=True)
+    if not df_display.empty:
+        pivot = df_display.pivot(index='Date', columns='Ticker', values='Close')
+        # Normalize để tránh lỗi chia cho 0
+        pivot_norm = pivot.apply(lambda x: (x / x.iloc[0] - 1) * 100 if x.iloc[0] != 0 else 0)
+        fig_norm = px.line(pivot_norm, x=pivot_norm.index, y=pivot_norm.columns, template='plotly_dark')
+        st.plotly_chart(fig_norm, use_container_width=True)
+    else:
+        st.info("Chưa đủ dữ liệu để vẽ biểu đồ.")
 
 with tab2:
     target_ticker = st.selectbox("Chọn mã soi chi tiết:", selected_tickers)
     tech_df = df[df['Ticker'] == target_ticker].copy().sort_values('Date')
-    tech_df = calculate_technical_indicators(tech_df)
-    mask = (tech_df['Date'] >= pd.to_datetime(start_date)) & (tech_df['Date'] <= pd.to_datetime(end_date))
-    tech_view = tech_df.loc[mask]
     
-    fig_tech = go.Figure()
-    fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['Close'], name='Close', line=dict(color='white')))
-    fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['MA20'], name='MA20', line=dict(color='yellow')))
-    fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['Upper_Band'], line=dict(color='gray', width=0), showlegend=False))
-    fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['Lower_Band'], line=dict(color='gray', width=0), fill='tonexty', showlegend=False))
-    st.plotly_chart(fig_tech, use_container_width=True)
-    
-    fig_rsi = px.line(tech_view, x='Date', y='RSI', title="Chỉ số RSI")
-    fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
-    fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
-    fig_rsi.update_layout(template='plotly_dark', height=250)
-    st.plotly_chart(fig_rsi, use_container_width=True)
+    if len(tech_df) > 0:
+        tech_df = calculate_technical_indicators(tech_df)
+        mask = (tech_df['Date'] >= pd.to_datetime(start_date)) & (tech_df['Date'] <= pd.to_datetime(end_date))
+        tech_view = tech_df.loc[mask]
+        
+        fig_tech = go.Figure()
+        fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['Close'], name='Close', line=dict(color='white')))
+        fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['MA20'], name='MA20', line=dict(color='yellow')))
+        fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['Upper_Band'], line=dict(color='gray', width=0), showlegend=False))
+        fig_tech.add_trace(go.Scatter(x=tech_view['Date'], y=tech_view['Lower_Band'], line=dict(color='gray', width=0), fill='tonexty', showlegend=False))
+        fig_tech.update_layout(template='plotly_dark', title=f"Biểu đồ giá {target_ticker}")
+        st.plotly_chart(fig_tech, use_container_width=True)
+        
+        fig_rsi = px.line(tech_view, x='Date', y='RSI', title="Chỉ số RSI")
+        fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
+        fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
+        fig_rsi.update_layout(template='plotly_dark', height=250)
+        st.plotly_chart(fig_rsi, use_container_width=True)
+    else:
+        st.info("Không có dữ liệu cho mã này.")
 
 with tab3:
     st.markdown("##### Xu hướng Mùa vụ (Theo tháng)")
     
     # Logic: Tính % change từng tháng -> Cộng dồn (Accumulate)
     full_history = df[df['Ticker'].isin(selected_tickers)].copy()
-    full_history['Month'] = full_history['Date'].dt.month
-    full_history['Year'] = full_history['Date'].dt.year
     
-    monthly_close = full_history.groupby(['Ticker', 'Year', 'Month'])['Close'].last().reset_index()
-    monthly_close['Pct_Change'] = monthly_close.groupby('Ticker')['Close'].pct_change()
-    
-    seasonality_avg = monthly_close.groupby(['Ticker', 'Month'])['Pct_Change'].mean().reset_index()
-    
-    season_chart_data = []
-    for ticker in selected_tickers:
-        t_data = seasonality_avg[seasonality_avg['Ticker'] == ticker].sort_values('Month')
-        # Bắt đầu từ 100
-        t_data['Cumulative_Trend'] = (1 + t_data['Pct_Change'].fillna(0)).cumprod() * 100
+    if not full_history.empty:
+        full_history['Month'] = full_history['Date'].dt.month
+        full_history['Year'] = full_history['Date'].dt.year
         
-        # Thêm điểm đầu (Tháng 0 = 100)
-        start_point = pd.DataFrame({'Ticker': [ticker], 'Month': [0], 'Cumulative_Trend': [100]})
-        t_data = pd.concat([start_point, t_data], ignore_index=True)
-        season_chart_data.append(t_data)
-    
-    if season_chart_data:
-        df_season = pd.concat(season_chart_data)
-        fig_season = px.line(df_season, x='Month', y='Cumulative_Trend', color='Ticker',
-                            template='plotly_dark', labels={'Cumulative_Trend': 'Chỉ số (Gốc=100)'})
-        fig_season.update_layout(xaxis=dict(tickmode='linear', tick0=0, dtick=1))
-        fig_season.add_hline(y=100, line_dash="dash", line_color="white", opacity=0.5)
-        st.plotly_chart(fig_season, use_container_width=True)
+        monthly_close = full_history.groupby(['Ticker', 'Year', 'Month'])['Close'].last().reset_index()
+        monthly_close['Pct_Change'] = monthly_close.groupby('Ticker')['Close'].pct_change()
+        
+        seasonality_avg = monthly_close.groupby(['Ticker', 'Month'])['Pct_Change'].mean().reset_index()
+        
+        season_chart_data = []
+        for ticker in selected_tickers:
+            t_data = seasonality_avg[seasonality_avg['Ticker'] == ticker].sort_values('Month')
+            # Bắt đầu từ 100
+            t_data['Cumulative_Trend'] = (1 + t_data['Pct_Change'].fillna(0)).cumprod() * 100
+            
+            # Thêm điểm đầu (Tháng 0 = 100)
+            start_point = pd.DataFrame({'Ticker': [ticker], 'Month': [0], 'Cumulative_Trend': [100]})
+            t_data = pd.concat([start_point, t_data], ignore_index=True)
+            season_chart_data.append(t_data)
+        
+        if season_chart_data:
+            df_season = pd.concat(season_chart_data)
+            fig_season = px.line(df_season, x='Month', y='Cumulative_Trend', color='Ticker',
+                                template='plotly_dark', labels={'Cumulative_Trend': 'Chỉ số (Gốc=100)'})
+            fig_season.update_layout(xaxis=dict(tickmode='linear', tick0=0, dtick=1))
+            fig_season.add_hline(y=100, line_dash="dash", line_color="white", opacity=0.5)
+            st.plotly_chart(fig_season, use_container_width=True)
+    else:
+        st.info("Chưa đủ dữ liệu để tính mùa vụ.")
 
 with tab4:
     st.markdown("##### Drawdown (Sụt giảm từ đỉnh lịch sử)")
     dd_data = pd.DataFrame()
     for ticker in selected_tickers:
         t_df = df[df['Ticker'] == ticker].sort_values('Date').copy()
-        t_df['Peak'] = t_df['Close'].cummax()
-        t_df['Drawdown'] = (t_df['Close'] - t_df['Peak']) / t_df['Peak'] * 100
-        
-        mask_dd = (t_df['Date'] >= pd.to_datetime(start_date)) & (t_df['Date'] <= pd.to_datetime(end_date))
-        dd_data[ticker] = t_df.loc[mask_dd].set_index('Date')['Drawdown']
+        if not t_df.empty:
+            t_df['Peak'] = t_df['Close'].cummax()
+            t_df['Drawdown'] = (t_df['Close'] - t_df['Peak']) / t_df['Peak'] * 100
+            
+            mask_dd = (t_df['Date'] >= pd.to_datetime(start_date)) & (t_df['Date'] <= pd.to_datetime(end_date))
+            t_subset = t_df.loc[mask_dd]
+            if not t_subset.empty:
+                dd_data[ticker] = t_subset.set_index('Date')['Drawdown']
     
-    fig_dd = px.area(dd_data, template='plotly_dark')
-    st.plotly_chart(fig_dd, use_container_width=True)
+    if not dd_data.empty:
+        fig_dd = px.area(dd_data, template='plotly_dark')
+        st.plotly_chart(fig_dd, use_container_width=True)
+    else:
+        st.info("Không có dữ liệu Drawdown trong khoảng này.")
 
 # --- 5. BÁO CÁO TỰ ĐỘNG (AUTO REPORT) ---
 st.markdown("---")
 st.header("Báo Cáo Phân Tích Tự Động")
 
 def generate_insight(ticker, df_input):
+    if df_input.empty: return "Chưa đủ dữ liệu"
     last_row = df_input.iloc[-1]
     
     # 1. Trend
@@ -287,19 +409,24 @@ with col_rep1:
     report_df = pd.DataFrame()
     for ticker in selected_tickers:
         t_df = df[df['Ticker'] == ticker].copy().sort_values('Date')
-        t_df = calculate_technical_indicators(t_df)
-        last_row = t_df.iloc[-1]
-        report_df = pd.concat([report_df, pd.DataFrame({
-            'Mã': [ticker], 
-            'Giá': [f"{last_row['Close']:,.0f}"], 
-            'RSI': [f"{last_row['RSI']:.1f}"]
-        })])
-    st.table(report_df.set_index('Mã'))
+        if not t_df.empty:
+            t_df = calculate_technical_indicators(t_df)
+            last_row = t_df.iloc[-1]
+            report_df = pd.concat([report_df, pd.DataFrame({
+                'Mã': [ticker], 
+                'Giá': [f"{last_row['Close']:,.0f}"], 
+                'RSI': [f"{last_row['RSI']:.1f}"]
+            })])
+    if not report_df.empty:
+        st.table(report_df.set_index('Mã'))
+    else:
+        st.write("Chưa có dữ liệu.")
 
 with col_rep2:
     st.success("Nhận định AI")
     for ticker in selected_tickers:
         t_df = df[df['Ticker'] == ticker].copy().sort_values('Date')
-        t_df = calculate_technical_indicators(t_df)
-        with st.expander(f"Chi tiết {ticker}", expanded=True):
-            st.markdown(generate_insight(ticker, t_df))
+        if not t_df.empty:
+            t_df = calculate_technical_indicators(t_df)
+            with st.expander(f"Chi tiết {ticker}", expanded=True):
+                st.markdown(generate_insight(ticker, t_df))
