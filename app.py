@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import numpy as np
 import os
 import re
-import yfinance as yf  # <--- THƯ VIỆN MỚI CẦN CÀI
+import yfinance as yf
 from datetime import datetime, timedelta
 
 # --- 1. CẤU HÌNH TRANG ---
@@ -119,10 +119,10 @@ def update_realtime_data(df_historical):
     if last_date.date() >= (today - timedelta(days=1)).date():
         return df_historical
 
-    # Thông báo nhẹ cho người dùng biết
-    st.toast(f"🔄 Đang cập nhật dữ liệu từ {last_date.date()} đến nay...", icon="cloud")
+    # --- SỬA LỖI TẠI ĐÂY: Dùng Emoji thay vì text ---
+    st.toast(f"🔄 Đang cập nhật dữ liệu từ {last_date.date()} đến nay...", icon="☁️")
 
-    # 2. Lấy danh sách mã và map ngành để điền lại sau khi tải
+    # 2. Lấy danh sách mã và map ngành
     ticker_sector_map = df_historical.set_index('Ticker')['Sector'].to_dict()
     tickers = list(ticker_sector_map.keys())
     
@@ -132,8 +132,6 @@ def update_realtime_data(df_historical):
     try:
         # 3. Tải dữ liệu mới
         start_fetch = last_date + timedelta(days=1)
-        
-        # Nếu start_fetch > today (trường hợp data trong file là dự báo tương lai) thì dừng
         if start_fetch.date() > today.date():
              return df_historical
 
@@ -142,55 +140,43 @@ def update_realtime_data(df_historical):
         if new_data.empty:
             return df_historical
             
-        # 4. Xử lý dữ liệu về format chuẩn (Date | Ticker | Close | Volume | Sector)
-        
-        # --- Xử lý cột Close ---
+        # 4. Xử lý dữ liệu
         if 'Close' in new_data.columns:
             df_close = new_data['Close'].reset_index()
-            # Nếu chỉ có 1 mã, pandas trả về Series/DataFrame đơn giản, cần xử lý riêng
             if len(tickers) == 1:
-                # Đổi tên cột thành tên mã để melt hoạt động đúng
                 df_close.columns = ['Date', tickers[0]] 
             
             df_melted = df_close.melt(id_vars=['Date'], var_name='Ticker', value_name='Close')
         else:
             return df_historical
             
-        # --- Xử lý cột Volume ---
         if 'Volume' in new_data.columns:
             df_vol = new_data['Volume'].reset_index()
             if len(tickers) == 1:
                 df_vol.columns = ['Date', tickers[0]]
                 
             df_vol_melted = df_vol.melt(id_vars=['Date'], var_name='Ticker', value_name='Volume')
-            # Gộp Volume vào bảng Close
             df_melted = pd.merge(df_melted, df_vol_melted, on=['Date', 'Ticker'], how='left')
         else:
             df_melted['Volume'] = 0
 
-        # 5. Làm sạch dữ liệu mới tải về
-        # Xóa đuôi .VN (do yfinance trả về kèm .VN)
+        # 5. Làm sạch
         df_melted['Ticker'] = df_melted['Ticker'].str.replace('.VN', '', regex=False)
-        
-        # Điền lại cột Sector (Quan trọng để bộ lọc hoạt động)
         df_melted['Sector'] = df_melted['Ticker'].map(ticker_sector_map)
-        
-        # Format cột Date
         df_melted['Date'] = pd.to_datetime(df_melted['Date'])
-        
-        # Loại bỏ dòng không có giá (NaN)
         df_melted = df_melted.dropna(subset=['Close'])
 
-        # 6. Gộp vào dữ liệu gốc
+        # 6. Gộp
         df_final = pd.concat([df_historical, df_melted], ignore_index=True)
-        # Sắp xếp lại
         df_final = df_final.sort_values(['Ticker', 'Date']).reset_index(drop=True)
         
-        st.toast("✅ Đã cập nhật xong dữ liệu mới nhất!", icon="check")
+        # --- SỬA LỖI TẠI ĐÂY: Dùng Emoji ---
+        st.toast("✅ Đã cập nhật xong dữ liệu mới nhất!", icon="✅")
         return df_final
 
     except Exception as e:
-        st.warning(f"Không thể cập nhật giá realtime: {e}")
+        # --- SỬA LỖI TẠI ĐÂY: Dùng Emoji ---
+        st.toast(f"Lỗi cập nhật: {str(e)}", icon="⚠️")
         return df_historical
 
 # --- 3. TÍNH TOÁN CHỈ SỐ KỸ THUẬT ---
@@ -210,7 +196,7 @@ def calculate_technical_indicators(df):
     df['Upper_Band'] = df['MA20'] + (std * 2)
     df['Lower_Band'] = df['MA20'] - (std * 2)
     
-    # Drawdown (Từ đỉnh lịch sử)
+    # Drawdown
     df['Peak'] = df['Close'].cummax()
     df['Drawdown'] = (df['Close'] - df['Peak']) / df['Peak'] * 100
     
@@ -221,7 +207,7 @@ def calculate_technical_indicators(df):
 # 1. Load file CSV
 df = load_and_merge_data()
 
-# 2. Tự động cập nhật thêm dữ liệu mới nhất (Realtime)
+# 2. Tự động cập nhật
 with st.spinner('Đang kiểm tra và cập nhật dữ liệu thị trường mới nhất...'):
     df = update_realtime_data(df)
 
@@ -243,7 +229,6 @@ df_filtered = df[(df['Date'] >= pd.to_datetime(start_date)) &
                  (df['Sector'].isin(selected_sectors))]
 
 available_tickers = df_filtered['Ticker'].unique()
-# Chọn mặc định 3 mã đầu tiên
 default_tickers = available_tickers[:3] if len(available_tickers) > 0 else []
 selected_tickers = st.sidebar.multiselect("Chọn Mã (Max 5)", available_tickers, default=default_tickers)
 
@@ -269,7 +254,6 @@ for i, ticker in enumerate(selected_tickers):
         color_cls = "gain" if change >= 0 else "loss"
         symbol = "▲" if change >= 0 else "▼"
         
-        # Chỉ hiển thị nếu còn cột trống
         if i < len(cols):
             with cols[i]:
                 st.markdown(f"""
@@ -289,7 +273,6 @@ with tab1:
     st.markdown("##### So sánh tăng trưởng (%) từ đầu kỳ")
     if not df_display.empty:
         pivot = df_display.pivot(index='Date', columns='Ticker', values='Close')
-        # Normalize để tránh lỗi chia cho 0
         pivot_norm = pivot.apply(lambda x: (x / x.iloc[0] - 1) * 100 if x.iloc[0] != 0 else 0)
         fig_norm = px.line(pivot_norm, x=pivot_norm.index, y=pivot_norm.columns, template='plotly_dark')
         st.plotly_chart(fig_norm, use_container_width=True)
@@ -324,7 +307,6 @@ with tab2:
 with tab3:
     st.markdown("##### Xu hướng Mùa vụ (Theo tháng)")
     
-    # Logic: Tính % change từng tháng -> Cộng dồn (Accumulate)
     full_history = df[df['Ticker'].isin(selected_tickers)].copy()
     
     if not full_history.empty:
@@ -339,10 +321,8 @@ with tab3:
         season_chart_data = []
         for ticker in selected_tickers:
             t_data = seasonality_avg[seasonality_avg['Ticker'] == ticker].sort_values('Month')
-            # Bắt đầu từ 100
             t_data['Cumulative_Trend'] = (1 + t_data['Pct_Change'].fillna(0)).cumprod() * 100
             
-            # Thêm điểm đầu (Tháng 0 = 100)
             start_point = pd.DataFrame({'Ticker': [ticker], 'Month': [0], 'Cumulative_Trend': [100]})
             t_data = pd.concat([start_point, t_data], ignore_index=True)
             season_chart_data.append(t_data)
@@ -385,10 +365,8 @@ def generate_insight(ticker, df_input):
     if df_input.empty: return "Chưa đủ dữ liệu"
     last_row = df_input.iloc[-1]
     
-    # 1. Trend
     trend = "TĂNG" if last_row['Close'] > last_row['MA20'] else "GIẢM"
     
-    # 2. RSI
     rsi = last_row['RSI']
     rsi_signal = "Trung tính"
     if rsi > 70: rsi_signal = "QUÁ MUA"
