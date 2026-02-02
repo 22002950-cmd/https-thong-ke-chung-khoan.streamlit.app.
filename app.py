@@ -103,34 +103,24 @@ def load_and_merge_data():
     
     return df_final
 
-# --- HÀM MỚI: TỰ ĐỘNG CẬP NHẬT GIÁ (AUTO UPDATE) ---
+# --- HÀM CẬP NHẬT GIÁ (AUTO UPDATE) ---
 def update_realtime_data(df_historical):
-    """
-    Tự động tải dữ liệu mới từ Yahoo Finance nếu file CSV bị cũ.
-    """
     if df_historical.empty:
         return df_historical
 
-    # 1. Kiểm tra ngày dữ liệu mới nhất trong file
     last_date = df_historical['Date'].max()
     today = datetime.now()
     
-    # Nếu dữ liệu đã cập nhật đến hôm qua/hôm nay thì bỏ qua
     if last_date.date() >= (today - timedelta(days=1)).date():
         return df_historical
 
-    # --- SỬA LỖI TẠI ĐÂY: Dùng Emoji thay vì text ---
     st.toast(f"🔄 Đang cập nhật dữ liệu từ {last_date.date()} đến nay...", icon="☁️")
 
-    # 2. Lấy danh sách mã và map ngành
     ticker_sector_map = df_historical.set_index('Ticker')['Sector'].to_dict()
     tickers = list(ticker_sector_map.keys())
-    
-    # Thêm đuôi .VN cho Yahoo Finance
     yf_tickers = [t + ".VN" for t in tickers]
     
     try:
-        # 3. Tải dữ liệu mới
         start_fetch = last_date + timedelta(days=1)
         if start_fetch.date() > today.date():
              return df_historical
@@ -140,7 +130,6 @@ def update_realtime_data(df_historical):
         if new_data.empty:
             return df_historical
             
-        # 4. Xử lý dữ liệu
         if 'Close' in new_data.columns:
             df_close = new_data['Close'].reset_index()
             if len(tickers) == 1:
@@ -160,54 +149,73 @@ def update_realtime_data(df_historical):
         else:
             df_melted['Volume'] = 0
 
-        # 5. Làm sạch
         df_melted['Ticker'] = df_melted['Ticker'].str.replace('.VN', '', regex=False)
         df_melted['Sector'] = df_melted['Ticker'].map(ticker_sector_map)
         df_melted['Date'] = pd.to_datetime(df_melted['Date'])
         df_melted = df_melted.dropna(subset=['Close'])
 
-        # 6. Gộp
         df_final = pd.concat([df_historical, df_melted], ignore_index=True)
         df_final = df_final.sort_values(['Ticker', 'Date']).reset_index(drop=True)
         
-        # --- SỬA LỖI TẠI ĐÂY: Dùng Emoji ---
         st.toast("✅ Đã cập nhật xong dữ liệu mới nhất!", icon="✅")
         return df_final
 
     except Exception as e:
-        # --- SỬA LỖI TẠI ĐÂY: Dùng Emoji ---
         st.toast(f"Lỗi cập nhật: {str(e)}", icon="⚠️")
         return df_historical
 
-# --- 3. TÍNH TOÁN CHỈ SỐ KỸ THUẬT ---
+# --- 3. TÍNH TOÁN CHỈ SỐ KỸ THUẬT & MÔ PHỎNG ---
 
 def calculate_technical_indicators(df):
     df = df.copy()
-    # RSI 14
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Bollinger Bands & MA
     df['MA20'] = df['Close'].rolling(window=20).mean()
     std = df['Close'].rolling(window=20).std()
     df['Upper_Band'] = df['MA20'] + (std * 2)
     df['Lower_Band'] = df['MA20'] - (std * 2)
     
-    # Drawdown
     df['Peak'] = df['Close'].cummax()
     df['Drawdown'] = (df['Close'] - df['Peak']) / df['Peak'] * 100
     
     return df
 
+def monte_carlo_simulation(df, ticker, forecast_days=30, simulations=500):
+    """Mô phỏng Monte Carlo dự báo giá"""
+    df_ticker = df[df['Ticker'] == ticker].sort_values('Date')
+    if len(df_ticker) < 30:
+        return None, None
+        
+    last_price = df_ticker['Close'].iloc[-1]
+    
+    # Tính log returns để có độ biến động chuẩn hơn
+    log_returns = np.log(1 + df_ticker['Close'].pct_change())
+    u = log_returns.mean()
+    var = log_returns.var()
+    
+    # Drift (Xu hướng) và Shock (Biến động ngẫu nhiên)
+    drift = u - (0.5 * var)
+    stdev = log_returns.std()
+    
+    # Tạo ma trận dự báo
+    daily_returns = np.exp(drift + stdev * np.random.normal(0, 1, (forecast_days, simulations)))
+    
+    price_paths = np.zeros_like(daily_returns)
+    price_paths[0] = last_price
+    
+    for t in range(1, forecast_days):
+        price_paths[t] = price_paths[t-1] * daily_returns[t]
+        
+    return price_paths, df_ticker['Date'].iloc[-1]
+
 # --- 4. GIAO DIỆN CHÍNH ---
 
-# 1. Load file CSV
 df = load_and_merge_data()
 
-# 2. Tự động cập nhật
 with st.spinner('Đang kiểm tra và cập nhật dữ liệu thị trường mới nhất...'):
     df = update_realtime_data(df)
 
@@ -242,7 +250,6 @@ df_display = df_filtered[df_filtered['Ticker'].isin(selected_tickers)]
 st.title("PRO TRADING ANALYTICS")
 st.markdown("---")
 
-# KPI Cards
 cols = st.columns(len(selected_tickers))
 for i, ticker in enumerate(selected_tickers):
     ticker_data = df_display[df_display['Ticker'] == ticker]
@@ -267,7 +274,8 @@ for i, ticker in enumerate(selected_tickers):
 st.markdown("###")
 
 # TABS
-tab1, tab2, tab3, tab4 = st.tabs(["Sức Mạnh Giá", "Phân Tích Kỹ Thuật", "Xu Hướng Mùa Vụ", "Rủi Ro Drawdown"])
+# Thêm Tab 5: Dự Phóng Tương Lai
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Sức Mạnh Giá", "Phân Tích Kỹ Thuật", "Xu Hướng Mùa Vụ", "Rủi Ro Drawdown", "🔮 Dự Phóng Tương Lai"])
 
 with tab1:
     st.markdown("##### So sánh tăng trưởng (%) từ đầu kỳ")
@@ -280,7 +288,7 @@ with tab1:
         st.info("Chưa đủ dữ liệu để vẽ biểu đồ.")
 
 with tab2:
-    target_ticker = st.selectbox("Chọn mã soi chi tiết:", selected_tickers)
+    target_ticker = st.selectbox("Chọn mã soi chi tiết (KT):", selected_tickers, key="tech_select")
     tech_df = df[df['Ticker'] == target_ticker].copy().sort_values('Date')
     
     if len(tech_df) > 0:
@@ -301,28 +309,21 @@ with tab2:
         fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
         fig_rsi.update_layout(template='plotly_dark', height=250)
         st.plotly_chart(fig_rsi, use_container_width=True)
-    else:
-        st.info("Không có dữ liệu cho mã này.")
 
 with tab3:
     st.markdown("##### Xu hướng Mùa vụ (Theo tháng)")
-    
     full_history = df[df['Ticker'].isin(selected_tickers)].copy()
-    
     if not full_history.empty:
         full_history['Month'] = full_history['Date'].dt.month
         full_history['Year'] = full_history['Date'].dt.year
-        
         monthly_close = full_history.groupby(['Ticker', 'Year', 'Month'])['Close'].last().reset_index()
         monthly_close['Pct_Change'] = monthly_close.groupby('Ticker')['Close'].pct_change()
-        
         seasonality_avg = monthly_close.groupby(['Ticker', 'Month'])['Pct_Change'].mean().reset_index()
         
         season_chart_data = []
         for ticker in selected_tickers:
             t_data = seasonality_avg[seasonality_avg['Ticker'] == ticker].sort_values('Month')
             t_data['Cumulative_Trend'] = (1 + t_data['Pct_Change'].fillna(0)).cumprod() * 100
-            
             start_point = pd.DataFrame({'Ticker': [ticker], 'Month': [0], 'Cumulative_Trend': [100]})
             t_data = pd.concat([start_point, t_data], ignore_index=True)
             season_chart_data.append(t_data)
@@ -334,8 +335,6 @@ with tab3:
             fig_season.update_layout(xaxis=dict(tickmode='linear', tick0=0, dtick=1))
             fig_season.add_hline(y=100, line_dash="dash", line_color="white", opacity=0.5)
             st.plotly_chart(fig_season, use_container_width=True)
-    else:
-        st.info("Chưa đủ dữ liệu để tính mùa vụ.")
 
 with tab4:
     st.markdown("##### Drawdown (Sụt giảm từ đỉnh lịch sử)")
@@ -345,7 +344,6 @@ with tab4:
         if not t_df.empty:
             t_df['Peak'] = t_df['Close'].cummax()
             t_df['Drawdown'] = (t_df['Close'] - t_df['Peak']) / t_df['Peak'] * 100
-            
             mask_dd = (t_df['Date'] >= pd.to_datetime(start_date)) & (t_df['Date'] <= pd.to_datetime(end_date))
             t_subset = t_df.loc[mask_dd]
             if not t_subset.empty:
@@ -354,19 +352,74 @@ with tab4:
     if not dd_data.empty:
         fig_dd = px.area(dd_data, template='plotly_dark')
         st.plotly_chart(fig_dd, use_container_width=True)
-    else:
-        st.info("Không có dữ liệu Drawdown trong khoảng này.")
 
-# --- 5. BÁO CÁO TỰ ĐỘNG (AUTO REPORT) ---
+# --- TAB 5: MONTE CARLO SIMULATION ---
+with tab5:
+    st.markdown("##### Mô phỏng Monte Carlo: Dự báo 1000 kịch bản giá tương lai")
+    st.info("ℹ️ Đây là mô phỏng xác suất dựa trên biến động lịch sử, không phải lời khuyên đầu tư chắc chắn.")
+    
+    mc_col1, mc_col2 = st.columns([1, 3])
+    
+    with mc_col1:
+        mc_ticker = st.selectbox("Chọn mã dự báo:", selected_tickers)
+        forecast_weeks = st.slider("Số tuần dự báo:", min_value=1, max_value=24, value=4)
+        forecast_days = forecast_weeks * 5 # Quy đổi ra ngày giao dịch
+        
+    price_paths, last_date = monte_carlo_simulation(df, mc_ticker, forecast_days)
+    
+    if price_paths is not None:
+        # Xử lý dữ liệu vẽ biểu đồ
+        future_dates = [last_date + timedelta(days=x) for x in range(1, forecast_days + 1)]
+        
+        # Lấy giá trị trung vị (Median) và các khoảng tin cậy
+        median_path = np.median(price_paths, axis=1)
+        upper_bound = np.percentile(price_paths, 95, axis=1) # Kịch bản lạc quan (Top 5%)
+        lower_bound = np.percentile(price_paths, 5, axis=1)  # Kịch bản bi quan (Bottom 5%)
+        
+        # Vẽ biểu đồ
+        fig_mc = go.Figure()
+        
+        # 1. Vẽ dữ liệu lịch sử gần đây (60 ngày cuối)
+        hist_df = df[df['Ticker'] == mc_ticker].sort_values('Date').tail(60)
+        fig_mc.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Close'], mode='lines', 
+                                    name='Lịch sử (60 phiên)', line=dict(color='white', width=2)))
+        
+        # 2. Vẽ vùng dự báo (Dải tin cậy)
+        fig_mc.add_trace(go.Scatter(x=future_dates, y=upper_bound, mode='lines', 
+                                    line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig_mc.add_trace(go.Scatter(x=future_dates, y=lower_bound, mode='lines', 
+                                    line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 0, 0.1)', 
+                                    name='Vùng biến động (90% xác suất)'))
+        
+        # 3. Vẽ đường trung vị
+        fig_mc.add_trace(go.Scatter(x=future_dates, y=median_path, mode='lines', 
+                                    name='Dự báo Trung vị', line=dict(color='yellow', dash='dash')))
+        
+        fig_mc.update_layout(template='plotly_dark', title=f"Dự báo {mc_ticker} trong {forecast_weeks} tuần tới")
+        st.plotly_chart(fig_mc, use_container_width=True)
+        
+        # Hiển thị bảng số liệu chốt
+        last_pred_median = median_path[-1]
+        last_pred_upper = upper_bound[-1]
+        last_pred_lower = lower_bound[-1]
+        curr_price_mc = hist_df.iloc[-1]['Close']
+        
+        st.markdown(f"""
+        **Kết quả dự báo sau {forecast_weeks} tuần:**
+        - Giá hiện tại: **{curr_price_mc:,.0f}**
+        - Kịch bản Trung bình (Median): **{last_pred_median:,.0f}** ({((last_pred_median-curr_price_mc)/curr_price_mc)*100:+.2f}%)
+        - Kịch bản Lạc quan (Top 5%): <span style='color:#4ade80'>**{last_pred_upper:,.0f}**</span>
+        - Kịch bản Bi quan (Bottom 5%): <span style='color:#f87171'>**{last_pred_lower:,.0f}**</span>
+        """, unsafe_allow_html=True)
+
+# --- 5. BÁO CÁO TỰ ĐỘNG ---
 st.markdown("---")
 st.header("Báo Cáo Phân Tích Tự Động")
 
 def generate_insight(ticker, df_input):
     if df_input.empty: return "Chưa đủ dữ liệu"
     last_row = df_input.iloc[-1]
-    
     trend = "TĂNG" if last_row['Close'] > last_row['MA20'] else "GIẢM"
-    
     rsi = last_row['RSI']
     rsi_signal = "Trung tính"
     if rsi > 70: rsi_signal = "QUÁ MUA"
@@ -397,8 +450,6 @@ with col_rep1:
             })])
     if not report_df.empty:
         st.table(report_df.set_index('Mã'))
-    else:
-        st.write("Chưa có dữ liệu.")
 
 with col_rep2:
     st.success("Nhận định AI")
